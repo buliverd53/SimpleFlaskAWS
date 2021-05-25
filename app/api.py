@@ -49,3 +49,9 @@ def api_comment_list(content_id):
                 'message': message,
                 }
         return jsonify(response), 404
+
+@app.route('/api/healthcheck')
+def api_healthcheck():
+
+    response = { 'status': 'up' }
+    return jsonify(response), 200
