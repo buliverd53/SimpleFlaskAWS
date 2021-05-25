@@ -3,6 +3,8 @@
 3-) Próximo passo finalizar a configuração do cloudformation para o provisionamento dos hosts
 4-) Adicionei uma rota de healthcheck no app para que o healthcheck no target group funcione corretamente
 5-) Script simples de monitoramento feito para detectar se o status da aplicação
+Obs.: Deixei o Cloudformation sem os mappings e sem o número da conta em alguns recursos como por ex.: AWS_ACCOUNT_ID, SUBNETS, VPC-ID etc...
+Infelizmente não tive tempo de efetuar a configuração utilizando o aws-cdk por falta de tempo.
 
 Melhorias que podem ser feitas:
 
