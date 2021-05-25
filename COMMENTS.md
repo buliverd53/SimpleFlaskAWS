@@ -1,5 +1,5 @@
-1-) Dockerfiler funcionando corretamente com o gunicorn permitindo acesso externo
-2-) Pipeline de deploy configurada
+1-) Dockerfile funcionando corretamente com o gunicorn permitindo acesso externo
+2-) Jenkinsfile criado para efetuar o deploy
 3-) Próximo passo finalizar a configuração do cloudformation para o provisionamento dos hosts
 4-) Adicionei uma rota de healthcheck no app para que o healthcheck no target group funcione corretamente
 5-) Script simples de monitoramento feito para detectar se o status da aplicação
