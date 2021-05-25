@@ -1,0 +1,388 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'flask-app ecs stack'
+Mappings:
+    AZsMap:
+        us-east-1:
+            'azs': [ 'us-east-1a', 'us-east-1b', 'us-east-1c', 'us-east-1d' ]
+    SecurityGroupMap:
+        us-east-1:
+            'elb': [ 'sg-' ]
+            'ec2': [ 'sg-' ]
+    SubnetsMap:
+        us-east-1:
+            'elb': [ 'subnet-', 'subnet-' ]
+            'ec2': [ 'subnet-', 'subnet-', 'subnet-', 'subnet-' ]
+    VpcMap:
+        us-east-1:
+            'default': ''
+Parameters:
+        LatestAmiId:
+            Type: 'AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>'
+            Default: '/aws/service/ecs/optimized-ami/amazon-linux-2/arm64/recommended/image_id'
+        InstanceType:
+            Description: 'Type of the instance that will be created'
+            Type: 'String'
+            Default: 't4g.medium'
+        AsgDesiredCapacity:
+            Description: 'Desired capacity for AutoScaling Group (instances in cluster)'
+            Type: 'Number'
+            Default: 4
+        AsgMaxSize:
+            Description: 'Maximum size of AutoScaling Group (instances in cluster)'
+            Type: 'Number'
+            Default: 8
+        AsgMinSize:
+            Description: 'Minimum size of AutoScaling Group (instances in cluster)'
+            Type: 'Number'
+            Default: 4
+        ServiceDesiredCapacity:
+            Description: 'Desired number of services running'
+            Type: 'Number'
+            Default: 4
+        ServiceMaxSize:
+            Description: 'Maximum number of services running'
+            Type: 'Number'
+            Default: 8
+        ServiceMinSize:
+            Description: 'Minimum number of services running'
+            Type: 'Number'
+            Default: 4
+        SshKeyName:
+            Description: 'SSH key name'
+            Type: 'String'
+            Default: 'admin'
+        HttpListenerRulePriority:
+            Description: 'The priority of the listener rule. Must be unique across all the ELB'
+            Type: 'Number'
+            Default: 100
+        HttpsListenerRulePriority:
+            Description: 'The priority of the listener rule. Must be unique across all the ELB'
+            Type: 'Number'
+            Default: 100
+Resources:
+    FlaskAppECSElb:
+        Type: 'AWS::ElasticLoadBalancingV2::LoadBalancer'
+        Properties:
+            LoadBalancerAttributes:
+                - Key: 'access_logs.s3.enabled'
+                    Value: 'false'
+            Name: 'flask-app'
+            Scheme: 'internet-facing'
+            SecurityGroups: !FindInMap [ SecurityGroupMap, !Ref 'AWS::Region', elb  ]
+            Subnets: !FindInMap [ SubnetsMap, !Ref 'AWS::Region', elb ]
+            Tags:
+                - Key: 'Name'
+                    Value: 'flask-app-elb'
+    FlaskAppECSTargetGroupHttps:
+        Type: 'AWS::ElasticLoadBalancingV2::TargetGroup'
+        Properties:
+            Name: 'flask-app'
+            Port: 80
+            Protocol: 'HTTP'
+            HealthCheckPath: '/healthcheck'
+            HealthCheckPort: 'traffic-port'
+            HealthyThresholdCount: 2
+            UnhealthyThresholdCount: 10
+            HealthCheckTimeoutSeconds: 3
+            HealthCheckIntervalSeconds: 30
+            HealthCheckProtocol: 'HTTP'
+            VpcId: !FindInMap [ 'VpcMap', !Ref 'AWS::Region', default ]
+            TargetGroupAttributes:
+                - Key: 'deregistration_delay.timeout_seconds'
+                    Value: 60
+            Matcher:
+                HttpCode: 200
+            Tags:
+                - Key: 'Name'
+                    Value: 'flask-app-https'
+    FlaskAppECSElbListenerHttp:
+        Type: 'AWS::ElasticLoadBalancingV2::Listener'
+        DependsOn: 'FlaskAppECSElb'
+        Properties:
+            LoadBalancerArn: !Ref FlaskAppECSElb
+            Port: 80
+            Protocol: 'HTTP'
+            DefaultActions:
+                - TargetGroupArn: !Ref FlaskAppECSTargetGroupHttps
+                    Type: 'forward'
+    FlaskAppECSElbListenerHttps:
+        Type: 'AWS::ElasticLoadBalancingV2::Listener'
+        DependsOn: 'FlaskAppECSElb'
+        Properties:
+            LoadBalancerArn: !Ref FlaskAppECSElb
+            Port: 443
+            Protocol: 'HTTPS'
+            SslPolicy: 'ELBSecurityPolicy-2015-05'
+            Certificates:
+                - CertificateArn: 'arn:aws:acm:us-east-1:ACCOUNT-ID:certificate/ID'
+            DefaultActions:
+                - TargetGroupArn: !Ref FlaskAppECSTargetGroupHttps
+                    Type: 'forward'
+
+    FlaskAppECSAutoScalingGroup:
+        Type: 'AWS::AutoScaling::AutoScalingGroup'
+        DependsOn: 'FlaskAppECSLaunchConfiguration'
+        Properties:
+            AvailabilityZones: !FindInMap [ AZsMap, !Ref 'AWS::Region', azs ]
+            LaunchConfigurationName: !Ref FlaskAppECSLaunchConfiguration
+            VPCZoneIdentifier: !FindInMap [ SubnetsMap, !Ref 'AWS::Region', ec2 ]
+            DesiredCapacity: !Ref AsgDesiredCapacity
+            MaxSize: !Ref AsgMaxSize
+            MinSize: !Ref AsgMinSize
+            Cooldown: 300
+            HealthCheckGracePeriod: 300
+            MetricsCollection:
+                - Granularity: '1Minute'
+            Tags:
+                - Key: 'Name'
+                    Value: 'flask-app'
+                    PropagateAtLaunch: 'true'
+    FlaskAppECSLaunchConfiguration:
+        Type: 'AWS::AutoScaling::LaunchConfiguration'
+        Properties:
+            ImageId: !Ref LatestAmiId
+            IamInstanceProfile: 'ecsInstanceRoleFlaskApp'
+            KeyName: !Ref SshKeyName
+            InstanceType: !Ref InstanceType
+            InstanceMonitoring: 'true'
+            SecurityGroups: !FindInMap [ SecurityGroupMap, !Ref 'AWS::Region', ec2  ]
+            UserData:
+                Fn::Base64:
+                    Fn::Join:
+                        - ''
+                        - [
+                            "#!/bin/bash\n\n",
+
+                            "sed -i",
+                            "   -e '/AuthorizedKeysCommand /cAuthorizedKeysCommand \\/usr/sbin/auth'",
+                            "   -e 's/#AuthorizedKeysCommandUser/AuthorizedKeysCommandUser/'",
+                            "   /etc/ssh/sshd_config\n\n",
+
+                            "sed -i",
+                            "   '/--default-ulimit/c OPTIONS=\"--default-ulimit nofile=1024:4096 --bip=192.168.25.1/24\"'",
+                            "   /etc/sysconfig/docker\n\n",
+
+                            "cat > /usr/sbin/auth <<EOF\n",
+                            "#!/bin/bash\n",
+                            "\n",
+                            "EOF\n\n",
+
+                            "chmod +x /usr/sbin/auth\n\n",
+
+                            "service sshd restart\n\n",
+                            "service docker restart\n\n",
+
+                            "echo ECS_CLUSTER=",
+                            !Ref FlaskAppECSCluster,
+                            " >> /etc/ecs/ecs.config\n\n",
+
+                            "echo ECS_IMAGE_CLEANUP_INTERVAL=5m >> /etc/ecs/ecs.config\n\n",
+                            "echo ECS_IMAGE_MINIMUM_CLEANUP_AGE=10m >> /etc/ecs/ecs.config\n\n",
+                            "echo ECS_NUM_IMAGES_DELETE_PER_CYCLE=10 >> /etc/ecs/ecs.config\n\n",
+                            "echo ECS_ENGINE_TASK_CLEANUP_WAIT_DURATION=5m >> /etc/ecs/ecs.config\n\n",
+                            ]      
+
+    FlaskAppECSCluster:
+        Type: 'AWS::ECS::Cluster'
+        Properties:
+            ClusterName: 'flask-app'
+    FlaskAppECSTaskRole:
+        Type: 'AWS::IAM::Role'
+        Properties:
+            RoleName: 'FlaskAppECSTaskRole'
+            ManagedPolicyArns:
+                - 'arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceforEC2Role'
+            AssumeRolePolicyDocument:
+                Version: '2012-10-17'
+                Statement:
+                    - Effect: 'Allow'
+                        Principal:
+                            Service:
+                                - 'ecs-tasks.amazonaws.com'
+                        Action:
+                            - 'sts:AssumeRole'
+    FlaskAppEcsServiceScaleRole:
+        Type: 'AWS::IAM::Role'
+        Properties:
+            AssumeRolePolicyDocument:
+                Version: '2012-10-17'
+                Statement:
+                    - Effect: 'Allow'
+                    Principal:
+                        Service:
+                            - 'application-autoscaling.amazonaws.com'
+                    Action:
+                        - 'sts:AssumeRole'
+            Policies:
+                - PolicyName: 'FlaskAppEcsAutoscaleRole'
+                PolicyDocument:
+                    Version: '2012-10-17'
+                    Statement:
+                        - Effect: 'Allow'
+                            Action: [ 'ecs:DescribeServices', 'ecs:UpdateService' ]
+                            Resource: '*'
+                        - Effect: 'Allow'
+                            Action: 'cloudwatch:DescribeAlarms'
+                            Resource: '*'
+    FlaskAppECSTaskDefinition:
+        Type: 'AWS::ECS::TaskDefinition'
+        Properties:
+            Family: 'flask-app'
+            NetworkMode: 'bridge'
+            TaskRoleArn: !Ref FlaskAppECSTaskRole
+            ContainerDefinitions:
+                - Name: 'flask-app'
+                    Essential: 'true'
+                    Image: 'buliverd53/flask-app:latest'
+                    Hostname: 'flask-app'
+                    PortMappings:
+                    - ContainerPort: 8000
+    FlaskAppECSService:
+        Type: 'AWS::ECS::Service'
+        DependsOn: [ 'FlaskAppECSTargetGroupHttps', 'FlaskAppECSTaskDefinition', 'FlaskAppECSElbListenerHttps' ]
+        Properties:
+            Cluster: !Ref FlaskAppECSCluster
+            DesiredCount: !Ref ServiceDesiredCapacity
+            HealthCheckGracePeriodSeconds: 100
+            Role: 'ecsServiceRole'
+            TaskDefinition: !Ref FlaskAppEcsTaskDefinition
+            PlacementConstraints:
+                - Type: distinctInstance
+            DeploymentConfiguration:
+                MaximumPercent: 200
+                MinimumHealthyPercent: 100
+            LoadBalancers:
+                - TargetGroupArn: !Ref FlaskAppTargetGroup
+                  ContainerPort: 8000
+                  ContainerName: 'flask-app'
+
+    FlaskAppEcsServiceScaling:
+        Type: 'AWS::ApplicationAutoScaling::ScalableTarget'
+        DependsOn: [ 'FlaskAppServiceScaleRole', 'FlaskAppEcsCluster', 'FlaskAppEcsService' ]
+        Properties:
+            MaxCapacity: !Ref ServiceMaxSize
+            MinCapacity: !Ref ServiceMinSize
+            ResourceId: !Join [ '', [ service/, !Ref FlaskAppEcsCluster, /, !GetAtt [ FlaskAppEcsService, Name ] ] ]
+            RoleARN: !GetAtt FlaskAppServiceScaleRole.Arn
+            ScalableDimension: 'ecs:service:DesiredCount'
+            ServiceNamespace: 'ecs'
+    FlaskAppEcsServicePolicyScaleUpGe80:
+        Type: 'AWS::ApplicationAutoScaling::ScalingPolicy'
+        DependsOn: 'FlaskAppEcsServiceScaling'
+        Properties:
+            PolicyName: 'ecs-flask-app-service-scale-up-ge80'
+            PolicyType: 'StepScaling'
+            ScalingTargetId: !Ref FlaskAppEcsServiceScaling
+            StepScalingPolicyConfiguration:
+                AdjustmentType: 'ChangeInCapacity'
+                Cooldown: 300
+                MetricAggregationType: 'Average'
+                StepAdjustments:
+                    - ScalingAdjustment: 1
+                      MetricIntervalLowerBound: 0
+                      MetricIntervalUpperBound: 20
+                    - ScalingAdjustment: 2
+                      MetricIntervalLowerBound: 20
+    FlaskAppEcsClusterPolicyScaleUpGe80:
+        Type: 'AWS::AutoScaling::ScalingPolicy'
+        DependsOn: 'FlaskAppEcsAutoScalingGroup'
+        Properties:
+            AdjustmentType: 'ChangeInCapacity'
+            AutoScalingGroupName: !Ref FlaskAppEcsAutoScalingGroup
+            PolicyType: 'StepScaling'
+            EstimatedInstanceWarmup: 60
+            StepAdjustments:
+                - ScalingAdjustment: 1
+                  MetricIntervalLowerBound: 0
+                  MetricIntervalUpperBound: 20
+                - ScalingAdjustment: 2
+                  MetricIntervalLowerBound: 20
+    FlaskAppEcsServicePolicyScaleDownLt70:
+        Type: 'AWS::ApplicationAutoScaling::ScalingPolicy'
+        DependsOn: 'FlaskAppEcsServiceScaling'
+        Properties:
+            PolicyName: 'ecs-flask-app-service-scale-down-lt70'
+            PolicyType: 'StepScaling'
+            ScalingTargetId: !Ref FlaskAppEcsServiceScaling
+            StepScalingPolicyConfiguration:
+                AdjustmentType: 'ChangeInCapacity'
+                Cooldown: 300
+                MetricAggregationType: 'Average'
+                StepAdjustments:
+                    - ScalingAdjustment: '-1'
+                      MetricIntervalUpperBound: 0
+    FlaskAppEcsClusterPolicyScaleDownLt70:
+        Type: 'AWS::AutoScaling::ScalingPolicy'
+        DependsOn: 'FlaskAppEcsAutoScalingGroup'
+        Properties:
+            AdjustmentType: 'ChangeInCapacity'
+            AutoScalingGroupName: !Ref FlaskAppEcsAutoScalingGroup
+            PolicyType: 'StepScaling'
+            EstimatedInstanceWarmup: 60
+            StepAdjustments:
+                - ScalingAdjustment: '-1'
+                  MetricIntervalUpperBound: 0
+    FlaskAppEcsServiceAlarmGe80:
+        Type: 'AWS::CloudWatch::Alarm'
+        DependsOn: [ 'FlaskAppEcsAutoScalingGroup', 'FlaskAppEcsServicePolicyScaleUpGe80' ]
+        Properties:
+            AlarmName: 'ecs-flask-app-service-ge80'
+            MetricName: 'CPUUtilization'
+            Threshold: 80
+            ComparisonOperator: 'GreaterThanOrEqualToThreshold'
+            Period: 60
+            EvaluationPeriods: 5
+            Statistic: 'Average'
+            Namespace: 'AWS/ECS'
+            AlarmActions: [ !Ref FlaskAppEcsServicePolicyScaleUpGe80 ]
+            Dimensions:
+                - Name: 'ClusterName'
+                  Value: !Ref FlaskAppEcsCluster
+    FlaskAppEcsClusterAlarmCpuGe80:
+        Type: 'AWS::CloudWatch::Alarm'
+        DependsOn: [ 'FlaskAppEcsAutoScalingGroup', 'FlaskAppEcsClusterPolicyScaleUpGe80' ]
+        Properties:
+            AlarmName: 'ecs-flask-app-ge80'
+            MetricName: 'CPUUtilization'
+            Threshold: 80
+            ComparisonOperator: 'GreaterThanOrEqualToThreshold'
+            Period: 60
+            EvaluationPeriods: 5
+            Statistic: 'Average'
+            Namespace: 'AWS/ECS'
+            AlarmActions: [ !Ref FlaskAppEcsClusterPolicyScaleUpGe80 ]
+            Dimensions:
+                - Name: 'ClusterName'
+                  Value: !Ref FlaskAppEcsCluster
+    FlaskAppEcsServiceAlarmCpuLt70:
+        Type: 'AWS::CloudWatch::Alarm'
+        DependsOn: [ 'FlaskAppEcsAutoScalingGroup', 'FlaskAppEcsServicePolicyScaleDownLt70' ]
+        Properties:
+            AlarmName: 'ecs-flask-app-service-lt70'
+            MetricName: 'CPUUtilization'
+            Threshold: 70
+            ComparisonOperator: 'LessThanThreshold'
+            Period: 300
+            EvaluationPeriods: 10
+            Statistic: 'Average'
+            Namespace: 'AWS/ECS'
+            AlarmActions: [ !Ref FlaskAppEcsServicePolicyScaleDownLt70 ]
+            Dimensions:
+                - Name: 'ClusterName'
+                  Value: !Ref FlaskAppEcsCluster
+    FlaskAppEcsClusterAlarmCpuLt70:
+        Type: 'AWS::CloudWatch::Alarm'
+        DependsOn: [ 'FlaskAppEcsAutoScalingGroup', 'FlaskAppEcsClusterPolicyScaleDownLt70' ]
+        Properties:
+            AlarmName: 'ecs-flask-app-lt70'
+            MetricName: 'CPUUtilization'
+            Threshold: 70
+            ComparisonOperator: 'LessThanThreshold'
+            Period: 300
+            EvaluationPeriods: 10
+            Statistic: 'Average'
+            Namespace: 'AWS/ECS'
+            AlarmActions: [ !Ref FlaskAppEcsClusterPolicyScaleDownLt70 ]
+            Dimensions:
+                - Name: 'ClusterName'
+                  Value: !Ref FlaskAppEcsCluster
