@@ -31,9 +31,11 @@ def build_docker(latest_release) {
     git url: 'git@github.com:buliverd53/unstesteai.git'
 
     sh """
-        docker build --rm -t buliverd53/flask-app:latest .
-        docker push buliverd53/flask-app:latest
-        docker rmi -f buliverd53/flask-app:latest
+        \$(aws ecr get-login --region us-east-1 --no-include-email)
+        
+        docker build --rm -t AWS_ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com/flask-app:latest .
+        docker push AWS_ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com/flask-app:latest
+        docker rmi -f AWS_ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com/flask-app:latest
     """
 }
 
@@ -41,7 +43,7 @@ def deploy(latest_release) {
     def ecsCluster = 'flask-apps'
     def stackName = 'flask-app01'
     def logicalResourceId = 'FlaskAppEcsService'
-    def imageName = "buliverd53/flask-app:latest"
+    def imageName = "AWS_ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com/flask-app:latest"
 
     def cmd = """
         aws cloudformation describe-stack-resources \
