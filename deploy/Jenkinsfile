@@ -1,0 +1,61 @@
+#!/groovy
+
+import groovy.json.JsonSlurperClassic;
+
+properties([
+    [ $class: 'BuildDiscarderProperty', strategy: [ $class: 'LogRotator', daysToKeepStr: '5' ] ],
+])
+
+
+pipeline {
+    options {
+        timestamps()
+    }
+    stages {
+        stage('Build Docker') {
+            steps {
+                build_docker(latest_release)
+            }
+        }
+        stage('Deploy') {
+            steps {
+                deploy(latest_release)
+            }
+        }
+    }
+}
+
+def build_docker(latest_release) {
+    deleteDir()
+
+    git url: 'git@github.com:buliverd53/unstesteai.git'
+
+    sh """
+        docker build --rm -t buliverd53/flask-app:latest .
+        docker push buliverd53/flask-app:latest
+        docker rmi -f buliverd53/flask-app:latest
+    """
+}
+
+def deploy(latest_release) {
+    def ecsCluster = 'flask-apps'
+    def stackName = 'flask-app01'
+    def logicalResourceId = 'FlaskAppEcsService'
+    def imageName = "buliverd53/flask-app:latest"
+
+    def cmd = """
+        aws cloudformation describe-stack-resources \
+            --stack-name ${stackName} \
+            --logical-resource-id ${logicalResourceId} \
+        | jq -r '.StackResources[0].PhysicalResourceId' \
+        | cut -d'/' -f2
+    """
+
+    def serviceName = sh(script: cmd, returnStdout: true).trim()
+
+    sh """
+        curl https://raw.githubusercontent.com/buliverd53/unstesteai/deploy/master/ecs-deploy > ecs-deploy
+        chmod +x ecs-deploy
+        ./ecs-deploy -c ${ecsCluster} -n ${serviceName} -i ${imageName} --timeout 300  --enable-rollback
+    """
+}
